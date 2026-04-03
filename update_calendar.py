@@ -44,12 +44,33 @@ def main():
     cal.add('X-WR-CALNAME', '기상청 날씨')
     cal.add('X-WR-TIMEZONE', 'Asia/Seoul')
 
-    # --- [A. 단기 예보 수집] (매회 실행) ---
+    # --- [1. 기존 데이터 확인 및 백업] ---
+    old_mid_events = []
+    has_old_file = os.path.exists('weather.ics')
+    
+    if has_old_file:
+        try:
+            with open('weather.ics', 'rb') as f:
+                old_cal = Calendar.from_ical(f.read())
+                for event in old_cal.walk('VEVENT'):
+                    start_dt = event.get('dtstart').dt
+                    # datetime 객체일 경우 date로 변환
+                    if isinstance(start_dt, datetime): start_dt = start_dt.date()
+                    # 오늘 기준 4일차 이후 데이터만 백업
+                    if start_dt >= (now + timedelta(days=4)).date():
+                        old_mid_events.append(event)
+        except:
+            has_old_file = False
+
+    # --- [2. 데이터 수집 판단] ---
+    # 파일이 없거나, 정해진 업데이트 시간이면 API 호출 / 아니면 백업 사용
+    is_mid_update_time = now.hour in [5, 17]
+    should_fetch_mid = (not has_old_file) or (not old_mid_events) or is_mid_update_time
+
+    # --- [3. 단기 예보 수집] (항상 실행) ---
     base_date = now.strftime('%Y%m%d')
-    # 기상청 업데이트 시간에 맞춘 base_time 설정
     base_h = max([h for h in [2, 5, 8, 11, 14, 17, 20, 23] if h <= now.hour], default=2)
     base_time = f"{base_h:02d}00"
-    
     url_short = f"https://apihub.kma.go.kr/api/typ02/openApi/VilageFcstInfoService_2.0/getVilageFcst?dataType=JSON&base_date={base_date}&base_time={base_time}&nx={NX}&ny={NY}&numOfRows=1000&authKey={API_KEY}"
     
     forecast_map = {}
@@ -62,23 +83,21 @@ def main():
             if t not in forecast_map[d]: forecast_map[d][t] = {}
             forecast_map[d][t][cat] = val
 
-    # --- [B. 중기 예보 수집] (특정 시간에만 실행) ---
-    # 기상청 중기 업데이트(06, 18시) 직후인 05:15(KST), 17:15(KST) 회차에서 호출
-    # (액션 스케줄 상 05:15, 17:15에 실행됨)
+    # --- [4. 중기 예보 수집] ---
     mid_map = {}
-    if now.hour in [5, 17]:
-        print(f"📢 중기 예보 업데이트 시간({now.hour}시) - API 호출을 시작합니다.")
+    if should_fetch_mid:
+        print("📢 중기 예보를 새로 불러옵니다.")
         tm_fc = now.strftime('%Y%m%d') + ("0600" if now.hour < 12 else "1800")
         url_mid_temp = f"https://apihub.kma.go.kr/api/typ02/openApi/MidFcstInfoService/getMidTa?dataType=JSON&regId={REG_ID_TEMP}&tmFc={tm_fc}&authKey={API_KEY}"
         url_mid_land = f"https://apihub.kma.go.kr/api/typ02/openApi/MidFcstInfoService/getMidLandFcst?dataType=JSON&regId={REG_ID_LAND}&tmFc={tm_fc}&authKey={API_KEY}"
         
-        mid_temp_res = fetch_api(url_mid_temp)
-        mid_land_res = fetch_api(url_mid_land)
+        t_res = fetch_api(url_mid_temp)
+        l_res = fetch_api(url_mid_land)
         
-        if mid_temp_res and mid_land_res:
+        if t_res and l_res:
             try:
-                t_item = mid_temp_res['response']['body']['items']['item'][0]
-                l_item = mid_land_res['response']['body']['items']['item'][0]
+                t_item = t_res['response']['body']['items']['item'][0]
+                l_item = l_res['response']['body']['items']['item'][0]
                 for i in range(4, 11):
                     d_str = (now + timedelta(days=i)).strftime('%Y%m%d')
                     if i <= 7:
@@ -92,17 +111,17 @@ def main():
                             'min': t_item.get(f'taMin{i}'), 'max': t_item.get(f'taMax{i}'),
                             'wf': l_item.get(f'wf{i}'), 'rn': l_item.get(f'rnSt{i}')
                         }
-            except Exception as e: print(f"중기 데이터 파싱 에러: {e}")
+            except: pass
     else:
-        print(f"ℹ️ {now.hour}시는 중기 업데이트 시간이 아니므로 건너뜁니다.")
+        print("📦 기존 중기 데이터를 재사용합니다.")
 
-    # --- [C. ics 생성 로직] --- (이전과 동일하게 단기 3일, 중기 4~10일 처리)
-    for i in range(11):
+    # --- [5. 최종 ICS 구성] ---
+    # 단기 생성 (0~3일)
+    for i in range(4):
         target_dt = now + timedelta(days=i)
         d_str = target_dt.strftime('%Y%m%d')
-        event = Event()
-        
-        if i <= 3 and d_str in forecast_map:
+        if d_str in forecast_map:
+            event = Event()
             d_data = forecast_map[d_str]
             times = sorted(d_data.keys())
             tmps = [float(d_data[t]['TMP']) for t in times if 'TMP' in d_data[t]]
@@ -120,8 +139,15 @@ def main():
                     desc.append(line)
                 desc.append(f"\n최종 갱신: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
                 event.add('description', "\n".join(desc))
-        elif d_str in mid_map:
-            m = mid_map[d_str]
+                event.add('dtstart', target_dt.date()); event.add('dtend', (target_dt + timedelta(days=1)).date())
+                event.add('uid', f"{d_str}@kma_weather")
+                cal.add_component(event)
+
+    # 중기 생성 (4~10일)
+    if should_fetch_mid and mid_map:
+        for d_str, m in mid_map.items():
+            event = Event()
+            target_dt = datetime.strptime(d_str, '%Y%m%d')
             rep_wf = m.get('wf_pm') or m.get('wf')
             event.add('summary', f"{get_mid_emoji(rep_wf)} {m['min']}°C / {m['max']}°C")
             desc = [f"📍 {LOCATION_NAME}\n"]
@@ -131,14 +157,16 @@ def main():
             else:
                 desc.append(f"[종일] {get_mid_emoji(m['wf'])} {m['wf']} (☔{m['rn']}%)")
             event.add('description', "\n".join(desc))
-
-        event.add('dtstart', target_dt.date())
-        event.add('dtend', (target_dt + timedelta(days=1)).date())
-        event.add('uid', f"{d_str}@kma_weather")
-        cal.add_component(event)
+            event.add('dtstart', target_dt.date()); event.add('dtend', (target_dt + timedelta(days=1)).date())
+            event.add('uid', f"{d_str}@kma_weather")
+            cal.add_component(event)
+    else:
+        for event in old_mid_events:
+            cal.add_component(event)
 
     with open('weather.ics', 'wb') as f:
         f.write(cal.to_ical())
+    print("✅ weather.ics 생성이 완료되었습니다.")
 
 if __name__ == "__main__":
     main()
