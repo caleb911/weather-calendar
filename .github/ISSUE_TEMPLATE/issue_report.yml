@@ -1,0 +1,17 @@
+name: 🐛 이슈 제보 (issue Report)
+description: 문제를 보고하기 전에 최신 코드로 업데이트했는지 확인해주세요.
+body:
+  - type: checkboxes
+    id: update-check
+    attributes:
+      label: 업데이트 확인 (Essential Check)
+      options:
+        - label: "나는 상위 저장소(Original Repo)의 최신 코드로 업데이트(Sync fork)한 뒤 다시 확인했습니다."
+          required: true
+  - type: textarea
+    id: issue-description
+    attributes:
+      label: 문제 내용
+      placeholder: 발생한 문제를 상세히 적어주세요.
+    validations:
+      required: true
