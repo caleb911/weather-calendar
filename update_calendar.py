@@ -100,10 +100,34 @@ def main():
     seoul_tz = pytz.timezone('Asia/Seoul')
     now = datetime.now(seoul_tz)
     update_ts = now.strftime('%Y-%m-%d %H:%M:%S')
+    today_str = now.strftime('%Y%m%d')
+
+    # --- [과거 이벤트 보존] 기존 weather.ics에서 오늘 이전 날짜 이벤트를 읽어 유지 ---
+    past_events = {}
+    try:
+        with open('weather.ics', 'rb') as f:
+            old_cal = Calendar.from_ical(f.read())
+        for component in old_cal.walk():
+            if component.name == 'VEVENT':
+                dtstart = component.get('dtstart')
+                if dtstart:
+                    event_date = dtstart.dt
+                    if hasattr(event_date, 'date'):
+                        event_date = event_date.date()
+                    date_str = event_date.strftime('%Y%m%d')
+                    # 오늘 이전 날짜만 보존 (오늘 포함 이후는 새 예보로 갱신)
+                    if date_str < today_str:
+                        past_events[date_str] = component
+    except Exception:
+        pass  # 파일 없거나 파싱 실패 시 무시
 
     cal = Calendar()
     cal.add('X-WR-CALNAME', '기상청 날씨')
     cal.add('X-WR-TIMEZONE', 'Asia/Seoul')
+
+    # 보존된 과거 이벤트를 먼저 추가
+    for component in past_events.values():
+        cal.add_component(component)
 
     # --- [2. 단기 예보] ---
     # [수정 1 적용] 자정~01:59 전날 2300 폴백 포함
